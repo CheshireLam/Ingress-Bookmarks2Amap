@@ -1,6 +1,6 @@
 // ==UserScript==
 // @id             iitc-plugin-ingress-bookmarks2amap
-// @name           Ingress Bookmarks -> Amap
+// @name           IITC plugin: Bookmarks -> Amap
 // @author         Cheshire Lam
 // @category       Controls
 // @version        0.1.0
@@ -220,6 +220,7 @@
         normalized.warnings.length ? '<p style="color:#b35c00;">警告: ' + normalized.warnings.length + ' 条（详见 JSON）</p>' : '',
         '<textarea id="amap-output-common" readonly style="width:100%;height:180px;"></textarea>',
         '<p style="color:#666;">高德地图「顺路规划」功能目前可添加 16 个途径点，即可以支持「起点 -> 途径点 -> 终点」共 18 个位置。</p>',
+        '<p style="color:#666;">高德地图 URI Web 最多只支持添加一个途径点，在网页版使用「Bookmarks -> Amap」链接可能会丢失途径点数据。</p>',
         '<p style="color:#666;">如果无法跳转至高德地图，请复制链接并使用系统浏览器打开链接。</p>',
         '</div>'
       ].join('');
