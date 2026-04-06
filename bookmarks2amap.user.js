@@ -151,6 +151,23 @@
       return params.toString();
     }
 
+    function buildWebRouteUrl(items, callnative) {
+      if (!Array.isArray(items) || items.length < 2) return '';
+      var from = items[0];
+      var to = items[items.length - 1];
+      var via = items.length > 2 ? items[1] : null; // URI Web supports one via
+      var params = new URLSearchParams();
+      params.set('from', from.lng + ',' + from.lat + ',' + from.title);
+      params.set('to', to.lng + ',' + to.lat + ',' + to.title);
+      if (via) params.set('via', via.lng + ',' + via.lat + ',' + via.title);
+      params.set('mode', 'car');
+      params.set('policy', '1');
+      params.set('src', 'iitc-amap-bridge');
+      params.set('coordinate', 'gaode');
+      params.set('callnative', callnative ? '1' : '0');
+      return 'https://uri.amap.com/navigation?' + params.toString();
+    }
+
     function escapeHtml(s) {
       return String(s)
         .replace(/&/g, '&amp;')
@@ -208,17 +225,17 @@
 
       var html = [
         '<div>',
-        '<p><b>当前 Portal：</b><span id="amap-current-portal">未选中</span> <button id="amap-copy-current" disabled>复制当前 Portal 链接</button></p>',
+        '<p><b>当前 Portal：</b><span id="amap-current-portal">未选中</span> <button id="amap-open-current" disabled>跳转高德地图</button></p>',
         '<p>选择 Folder（已选 Portal：<span id="amap-selected-count">0</span>）</p>',
         '<div id="amap-folder-list" style="margin:8px 0 10px 0;">',
         folders.map(function (f) {
           return '<label style="display:inline-block;margin-right:10px;"><input type="checkbox" class="amap-folder-check" data-folder="' + escapeHtml(f) + '" checked> ' + escapeHtml(f) + '</label>';
         }).join(''),
         '</div>',
-        '<p>平台：<select id="amap-platform"><option value="ios">iOS</option><option value="android">Android</option></select> <button id="amap-open-amap">跳转高德地图</button></p>',
+        '<p>平台：<select id="amap-platform"><option value="ios">iOS</option><option value="android">Android</option></select> <button id="amap-open-amap">跳转高德地图</button> <button id="amap-open-web">Web 跳转高德地图</button></p>',
         normalized.warnings.length ? '<p style="color:#b35c00;">警告: ' + normalized.warnings.length + ' 条（详见 JSON）</p>' : '',
         '<textarea id="amap-output-common" readonly style="width:100%;height:180px;"></textarea>',
-        '<p><button id="amap-copy-route">复制路线链接</button></p>',
+        '<p><button id="amap-copy-current">复制当前 Portal 链接</button> <button id="amap-copy-route">复制路线链接</button></p>',
         '</div>'
       ].join('');
 
@@ -230,13 +247,16 @@
 
       setTimeout(function () {
         var folderChecks = Array.prototype.slice.call(document.querySelectorAll('.amap-folder-check'));
+        var btnOpenCurrent = document.getElementById('amap-open-current');
         var btnCopyCurrent = document.getElementById('amap-copy-current');
         var btnCopyRoute = document.getElementById('amap-copy-route');
         var btnOpenAmap = document.getElementById('amap-open-amap');
+        var btnOpenWeb = document.getElementById('amap-open-web');
         var platformSelect = document.getElementById('amap-platform');
         var outputCommon = document.getElementById('amap-output-common');
         var selectedCountEl = document.getElementById('amap-selected-count');
         var currentPortalEl = document.getElementById('amap-current-portal');
+        var currentSelectedItems = [];
         var currentRouteParams = [];
         var lastSelectedPortalGuid = '';
 
@@ -250,6 +270,7 @@
 
         function refreshOutputs() {
           var sel = selectedItems();
+          currentSelectedItems = sel;
           var currentPortal = getCurrentPortalData();
           var segments = splitIntoSegments(sel, MAX_POINTS_PER_IOS_SEGMENT);
           currentRouteParams = segments.map(function (seg) { return buildCommonRouteParams(seg, 'IITC-Intel'); }).filter(Boolean);
@@ -258,10 +279,14 @@
           selectedCountEl.textContent = String(sel.length);
           if (currentPortal) {
             currentPortalEl.textContent = currentPortal.title;
+            btnOpenCurrent.disabled = false;
+            btnOpenCurrent.setAttribute('data-url', buildAmapMarkerUrl(currentPortal));
             btnCopyCurrent.disabled = false;
             btnCopyCurrent.setAttribute('data-url', buildAmapMarkerUrl(currentPortal));
           } else {
             currentPortalEl.textContent = '未选中';
+            btnOpenCurrent.disabled = true;
+            btnOpenCurrent.setAttribute('data-url', '');
             btnCopyCurrent.disabled = true;
             btnCopyCurrent.setAttribute('data-url', '');
           }
@@ -272,6 +297,13 @@
           ch.addEventListener('change', refreshOutputs);
         });
         refreshOutputs();
+
+        if (btnOpenCurrent) btnOpenCurrent.onclick = function () {
+          if (btnOpenCurrent.disabled) return;
+          var u = btnOpenCurrent.getAttribute('data-url') || '';
+          if (!u) return;
+          window.location.href = u;
+        };
 
         if (btnCopyCurrent) btnCopyCurrent.onclick = function () {
           if (btnCopyCurrent.disabled) return;
@@ -309,7 +341,28 @@
             alert('没有可跳转的路线，请先选择至少 2 个 portal。');
             return;
           }
-          window.location.href = links[0];
+          var schemeUrl = links[0];
+          var webFallback = buildWebRouteUrl(currentSelectedItems, true);
+          var leftPage = false;
+          var onHidden = function () {
+            leftPage = true;
+          };
+          document.addEventListener('visibilitychange', onHidden, { once: true });
+          window.location.href = schemeUrl;
+          window.setTimeout(function () {
+            if (!leftPage && webFallback) {
+              window.location.href = webFallback;
+            }
+          }, 900);
+        };
+
+        if (btnOpenWeb) btnOpenWeb.onclick = function () {
+          var webUrl = buildWebRouteUrl(currentSelectedItems, false);
+          if (!webUrl) {
+            alert('没有可跳转的 Web 路线，请先选择至少 2 个 portal。');
+            return;
+          }
+          window.location.href = webUrl;
         };
 
         if (typeof window.addHook === 'function') {
@@ -331,6 +384,7 @@
         readBookmarksObject: readBookmarksObject,
         normalizePortalsFromBookmarks: normalizePortalsFromBookmarks,
         buildAmapMarkerUrl: buildAmapMarkerUrl,
+        buildWebRouteUrl: buildWebRouteUrl,
         buildCommonRouteParams: buildCommonRouteParams,
         splitIntoSegments: splitIntoSegments
       };
