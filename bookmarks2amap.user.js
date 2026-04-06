@@ -208,17 +208,19 @@
 
       var html = [
         '<div>',
-        '<p><b>当前 Portal：</b><span id="amap-current-portal">未选中</span> <button id="amap-open-current" disabled>跳转高德地图</button></p>',
-        '<p>选择 Folder（已选 Portal：<span id="amap-selected-count">0</span>）</p>',
+        '<p><b>当前 Portal:</b><span id="amap-current-portal">未选中</span> <button id="amap-open-current" disabled>跳转高德地图</button> <button id="amap-copy-current">复制当前 Portal 链接</button></p>',
+        '<p>&nbsp;</p>',
+        '<p><b>Bookmarks Portal:</b> 选择 Folder（已选 Portal：<span id="amap-selected-count">0</span>）</p>',
         '<div id="amap-folder-list" style="margin:8px 0 10px 0;">',
         folders.map(function (f) {
           return '<label style="display:inline-block;margin-right:10px;"><input type="checkbox" class="amap-folder-check" data-folder="' + escapeHtml(f) + '" checked> ' + escapeHtml(f) + '</label>';
         }).join(''),
         '</div>',
-        '<p>平台：<select id="amap-platform"><option value="ios">iOS</option><option value="android">Android</option></select> <button id="amap-open-amap">跳转高德地图</button></p>',
+        '<p>平台：<select id="amap-platform"><option value="ios">iOS</option><option value="android">Android</option></select> <button id="amap-open-amap">跳转高德地图</button> <button id="amap-copy-route">复制路线链接</button></p>',
         normalized.warnings.length ? '<p style="color:#b35c00;">警告: ' + normalized.warnings.length + ' 条（详见 JSON）</p>' : '',
         '<textarea id="amap-output-common" readonly style="width:100%;height:180px;"></textarea>',
-        '<p><button id="amap-copy-current">复制当前 Portal 链接</button> <button id="amap-copy-route">复制路线链接</button></p>',
+        '<p style="color:#666;">高德地图「顺路规划」功能目前可添加 16 个途径点，即可以支持「起点 -> 途径点 -> 终点」共 18 个位置。</p>',
+        '<p style="color:#666;">如果无法跳转至高德地图，请复制链接并使用系统浏览器打开链接。</p>',
         '</div>'
       ].join('');
 
