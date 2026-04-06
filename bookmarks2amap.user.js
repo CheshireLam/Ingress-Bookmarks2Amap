@@ -151,23 +151,6 @@
       return params.toString();
     }
 
-    function buildWebRouteUrl(items, callnative) {
-      if (!Array.isArray(items) || items.length < 2) return '';
-      var from = items[0];
-      var to = items[items.length - 1];
-      var via = items.length > 2 ? items[1] : null; // URI Web supports one via
-      var params = new URLSearchParams();
-      params.set('from', from.lng + ',' + from.lat + ',' + from.title);
-      params.set('to', to.lng + ',' + to.lat + ',' + to.title);
-      if (via) params.set('via', via.lng + ',' + via.lat + ',' + via.title);
-      params.set('mode', 'car');
-      params.set('policy', '1');
-      params.set('src', 'iitc-amap-bridge');
-      params.set('coordinate', 'gaode');
-      params.set('callnative', callnative ? '1' : '0');
-      return 'https://uri.amap.com/navigation?' + params.toString();
-    }
-
     function escapeHtml(s) {
       return String(s)
         .replace(/&/g, '&amp;')
@@ -232,7 +215,7 @@
           return '<label style="display:inline-block;margin-right:10px;"><input type="checkbox" class="amap-folder-check" data-folder="' + escapeHtml(f) + '" checked> ' + escapeHtml(f) + '</label>';
         }).join(''),
         '</div>',
-        '<p>平台：<select id="amap-platform"><option value="ios">iOS</option><option value="android">Android</option></select> <button id="amap-open-amap">跳转高德地图</button> <button id="amap-open-web">Web 跳转高德地图</button></p>',
+        '<p>平台：<select id="amap-platform"><option value="ios">iOS</option><option value="android">Android</option></select> <button id="amap-open-amap">跳转高德地图</button></p>',
         normalized.warnings.length ? '<p style="color:#b35c00;">警告: ' + normalized.warnings.length + ' 条（详见 JSON）</p>' : '',
         '<textarea id="amap-output-common" readonly style="width:100%;height:180px;"></textarea>',
         '<p><button id="amap-copy-current">复制当前 Portal 链接</button> <button id="amap-copy-route">复制路线链接</button></p>',
@@ -251,13 +234,10 @@
         var btnCopyCurrent = document.getElementById('amap-copy-current');
         var btnCopyRoute = document.getElementById('amap-copy-route');
         var btnOpenAmap = document.getElementById('amap-open-amap');
-        var btnOpenWeb = document.getElementById('amap-open-web');
         var platformSelect = document.getElementById('amap-platform');
         var outputCommon = document.getElementById('amap-output-common');
         var selectedCountEl = document.getElementById('amap-selected-count');
         var currentPortalEl = document.getElementById('amap-current-portal');
-        var currentSelectedItems = [];
-        var currentRouteParams = [];
         var lastSelectedPortalGuid = '';
 
         function selectedItems() {
@@ -268,14 +248,24 @@
           return items.filter(function (x) { return !!selectedFolders[x.folder]; });
         }
 
+        function buildLinksForPlatform(sel, platform) {
+          if (!Array.isArray(sel) || sel.length < 2) return [];
+          var prefix = platform === 'android' ? 'androidamap://route?' : 'iosamap://path?';
+          var segments = splitIntoSegments(sel, MAX_POINTS_PER_IOS_SEGMENT);
+          return segments.map(function (seg) {
+            return buildCommonRouteParams(seg, 'IITC-Intel');
+          }).filter(Boolean).map(function (p) {
+            return prefix + p;
+          });
+        }
+
         function refreshOutputs() {
           var sel = selectedItems();
-          currentSelectedItems = sel;
           var currentPortal = getCurrentPortalData();
-          var segments = splitIntoSegments(sel, MAX_POINTS_PER_IOS_SEGMENT);
-          currentRouteParams = segments.map(function (seg) { return buildCommonRouteParams(seg, 'IITC-Intel'); }).filter(Boolean);
+          var platform = (platformSelect && platformSelect.value) || 'ios';
+          var routeLinks = buildLinksForPlatform(sel, platform);
 
-          outputCommon.value = currentRouteParams.join('\n');
+          outputCommon.value = routeLinks.join('\n');
           selectedCountEl.textContent = String(sel.length);
           if (currentPortal) {
             currentPortalEl.textContent = currentPortal.title;
@@ -323,46 +313,27 @@
           window.localStorage.setItem(PREF_PLATFORM_KEY, platformSelect.value);
           platformSelect.addEventListener('change', function () {
             window.localStorage.setItem(PREF_PLATFORM_KEY, platformSelect.value);
+            refreshOutputs();
           });
         }
 
         if (btnCopyRoute) btnCopyRoute.onclick = function () {
+          var sel = selectedItems();
           var platform = (platformSelect && platformSelect.value) || 'ios';
-          var prefix = platform === 'android' ? 'androidamap://route?' : 'iosamap://path?';
-          var links = currentRouteParams.map(function (p) { return prefix + p; });
+          var links = buildLinksForPlatform(sel, platform);
           copyText(links.join('\n'));
         };
 
         if (btnOpenAmap) btnOpenAmap.onclick = function () {
+          var sel = selectedItems();
           var platform = (platformSelect && platformSelect.value) || 'ios';
-          var prefix = platform === 'android' ? 'androidamap://route?' : 'iosamap://path?';
-          var links = currentRouteParams.map(function (p) { return prefix + p; });
+          var links = buildLinksForPlatform(sel, platform);
           if (!links.length) {
             alert('没有可跳转的路线，请先选择至少 2 个 portal。');
             return;
           }
-          var schemeUrl = links[0];
-          var webFallback = buildWebRouteUrl(currentSelectedItems, true);
-          var leftPage = false;
-          var onHidden = function () {
-            leftPage = true;
-          };
-          document.addEventListener('visibilitychange', onHidden, { once: true });
-          window.location.href = schemeUrl;
-          window.setTimeout(function () {
-            if (!leftPage && webFallback) {
-              window.location.href = webFallback;
-            }
-          }, 900);
-        };
-
-        if (btnOpenWeb) btnOpenWeb.onclick = function () {
-          var webUrl = buildWebRouteUrl(currentSelectedItems, false);
-          if (!webUrl) {
-            alert('没有可跳转的 Web 路线，请先选择至少 2 个 portal。');
-            return;
-          }
-          window.location.href = webUrl;
+          // Keep native scheme only for iOS/Android.
+          window.location.href = links[0];
         };
 
         if (typeof window.addHook === 'function') {
@@ -384,7 +355,6 @@
         readBookmarksObject: readBookmarksObject,
         normalizePortalsFromBookmarks: normalizePortalsFromBookmarks,
         buildAmapMarkerUrl: buildAmapMarkerUrl,
-        buildWebRouteUrl: buildWebRouteUrl,
         buildCommonRouteParams: buildCommonRouteParams,
         splitIntoSegments: splitIntoSegments
       };
