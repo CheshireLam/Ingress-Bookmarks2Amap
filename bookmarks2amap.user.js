@@ -3,7 +3,7 @@
 // @name           IITC plugin: Bookmarks -> Amap
 // @author         Cheshire Lam
 // @category       Controls
-// @version        0.1.0
+// @version        0.1.1
 // @description    Export IITC bookmarks to Amap route links. Code by GPT-5.3-Codex.
 // @match          https://intel.ingress.com/*
 // @match          https://intel-x.ingress.com/*
@@ -39,6 +39,45 @@
       if (item && typeof item.label === 'string' && item.label.trim()) return item.label.trim();
       if (item && typeof item.guid === 'string' && item.guid.trim()) return item.guid.trim();
       return String(bookmarkId || 'untitled');
+    }
+
+    function isInChina(lat, lng) {
+      return lng >= 73.66 && lng <= 135.05 && lat >= 3.86 && lat <= 53.55;
+    }
+
+    function transformLat(x, y) {
+      var ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+      ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+      return ret;
+    }
+
+    function transformLon(x, y) {
+      var ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+      ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+      return ret;
+    }
+
+    function wgs84ToGcj02(lat, lng) {
+      if (!isInChina(lat, lng)) return { lat: lat, lng: lng };
+      var a = 6378245.0;
+      var ee = 0.00669342162296594323;
+      var dLat = transformLat(lng - 105.0, lat - 35.0);
+      var dLon = transformLon(lng - 105.0, lat - 35.0);
+      var radLat = lat / 180.0 * Math.PI;
+      var magic = Math.sin(radLat);
+      magic = 1 - ee * magic * magic;
+      var sqrtMagic = Math.sqrt(magic);
+      dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+      dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+      return { lat: lat + dLat, lng: lng + dLon };
+    }
+
+    function toAmapCoordinate(item) {
+      return wgs84ToGcj02(item.lat, item.lng);
     }
 
     function readBookmarksObject() {
@@ -100,8 +139,9 @@
     }
 
     function buildAmapMarkerUrl(item) {
+      var p = toAmapCoordinate(item);
       var params = new URLSearchParams();
-      params.set('position', item.lng + ',' + item.lat); // lon,lat
+      params.set('position', p.lng + ',' + p.lat); // lon,lat
       params.set('name', item.title);
       params.set('src', 'iitc-amap-bridge');
       params.set('coordinate', 'gaode');
@@ -130,22 +170,25 @@
       var start = segment[0];
       var end = segment[segment.length - 1];
       var vias = segment.slice(1, -1).slice(0, 16);
+      var startP = toAmapCoordinate(start);
+      var endP = toAmapCoordinate(end);
+      var viaP = vias.map(toAmapCoordinate);
 
       var params = new URLSearchParams();
       params.set('sourceApplication', sourceApplication || 'IITC-Intel');
-      params.set('slat', String(start.lat));
-      params.set('slon', String(start.lng));
+      params.set('slat', String(startP.lat));
+      params.set('slon', String(startP.lng));
       params.set('sname', start.title);
-      params.set('dlat', String(end.lat));
-      params.set('dlon', String(end.lng));
+      params.set('dlat', String(endP.lat));
+      params.set('dlon', String(endP.lng));
       params.set('dname', end.title);
       params.set('dev', '1');
       params.set('t', '0');
 
       if (vias.length > 0) {
         params.set('vian', String(vias.length));
-        params.set('vialons', vias.map(function (v) { return String(v.lng); }).join('|'));
-        params.set('vialats', vias.map(function (v) { return String(v.lat); }).join('|'));
+        params.set('vialons', viaP.map(function (v) { return String(v.lng); }).join('|'));
+        params.set('vialats', viaP.map(function (v) { return String(v.lat); }).join('|'));
         params.set('vianames', vias.map(function (v) { return String(v.title || 'via'); }).join('|'));
       }
       return params.toString();
