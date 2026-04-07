@@ -1,6 +1,6 @@
 // ==UserScript==
 // @id             iitc-plugin-ingress-bookmarks2amap
-// @name           IITC plugin: Bookmarks -> Maps
+// @name           IITC plugin: Bookmarks -> Amap
 // @author         Cheshire Lam
 // @category       Controls
 // @version        0.1.1
@@ -94,6 +94,39 @@
     function toBaiduCoordinate(item) {
       var gcj = toGcjCoordinate(item);
       return gcj02ToBd09(gcj.lat, gcj.lng);
+    }
+
+    var BAIDU_LL_BAND = [75, 60, 45, 30, 15, 0];
+    var BAIDU_LL2MC = [
+      [-0.0015702102444, 111320.7020616939, 1704480524535203, -10338987376042340, 26112667856603880, -35149669176653700, 26595700718403920, -10725012454188240, 1800819912950474, 82.5],
+      [0.0008277824516172526, 111320.7020463578, 647795574.6671607, -4082003173.641316, 10774905663.51142, -15171875531.51559, 12053065338.62167, -5124939663.577472, 913311935.9512032, 67.5],
+      [0.00337398766765, 111320.7020202162, 4481351.045890365, -23393751.19931662, 79682215.47186455, -115964993.2797253, 97236711.15602145, -43661946.33752821, 8477230.501135234, 52.5],
+      [0.00220636496208, 111320.7020209128, 51751.86112841131, 3796837.749470245, 992013.7397791013, -1221952.21711287, 1340652.697009075, -620943.6990984312, 144416.9293806241, 37.5],
+      [-0.0003441963504368392, 111320.7020576856, 278.2353980772752, 2485758.690035394, 6070.750963243378, 54821.18345352118, 9540.606633304236, -2710.55326746645, 1405.483844121726, 22.5],
+      [-0.0003218135878613132, 111320.7020701615, 0.00369383431289, 823725.6402795718, 0.46104986909093, 2351.343141331292, 1.58060784298199, 8.77738589078284, 0.37238884252424, 7.45]
+    ];
+
+    function baiduConvertorLL2MC(ll, coeff) {
+      var x = coeff[0] + coeff[1] * Math.abs(ll.lng);
+      var c = Math.abs(ll.lat) / coeff[9];
+      var y = coeff[2] + coeff[3] * c + coeff[4] * c * c + coeff[5] * c * c * c +
+        coeff[6] * c * c * c * c + coeff[7] * c * c * c * c * c + coeff[8] * c * c * c * c * c * c;
+      x *= (ll.lng < 0 ? -1 : 1);
+      y *= (ll.lat < 0 ? -1 : 1);
+      return { x: x, y: y };
+    }
+
+    function bd09llToBd09mc(ll) {
+      var lat = Math.max(Math.min(ll.lat, 74), -74);
+      var absLat = Math.abs(lat);
+      var coeff = BAIDU_LL2MC[BAIDU_LL2MC.length - 1];
+      for (var i = 0; i < BAIDU_LL_BAND.length; i++) {
+        if (absLat >= BAIDU_LL_BAND[i]) {
+          coeff = BAIDU_LL2MC[i];
+          break;
+        }
+      }
+      return baiduConvertorLL2MC({ lat: lat, lng: ll.lng }, coeff);
     }
 
     function readBookmarksObject() {
@@ -254,27 +287,32 @@
 
     function buildBaiduWebRouteUrl(points) {
       if (!points) return '';
-      // Heavy Baidu web route URL (map.baidu.com/dir) tends to persist A-B better than lightweight direction API.
-      var startP = toBaiduCoordinate(points.start);
-      var endP = toBaiduCoordinate(points.end);
+      var startLL = toBaiduCoordinate(points.start);
+      var endLL = toBaiduCoordinate(points.end);
+      var startMC = bd09llToBd09mc(startLL);
+      var endMC = bd09llToBd09mc(endLL);
       var startName = encodeURIComponent(points.start.title || '起点');
       var endName = encodeURIComponent(points.end.title || '终点');
       var path = '/dir/' + startName + '/' + endName + '/';
       var q = new URLSearchParams();
       q.set('querytype', 'nav');
+      q.set('da_src', 'shareurl');
+      q.set('navtp', '4');
       q.set('c', '1');
-      q.set('sn', '2$$$$$$' + (points.start.title || '起点') + '$$0$$$$');
-      q.set('en', '2$$$$$$' + (points.end.title || '终点') + '$$0$$$$');
+      q.set('drag', '0');
       q.set('sc', '1');
       q.set('ec', '1');
-      q.set('version', '4');
-      q.set('route_traffic', '1');
       q.set('sy', '0');
-      q.set('src', BAIDU_SRC);
-      // Embed coordinates in viewport hint to keep the map centered around the two points.
-      var centerLng = ((startP.lng + endP.lng) / 2).toFixed(6);
-      var centerLat = ((startP.lat + endP.lat) / 2).toFixed(6);
-      return 'https://map.baidu.com' + path + '@' + centerLng + ',' + centerLat + ',12z?' + q.toString();
+      q.set('sn', '0$$$$' + startMC.x.toFixed(4) + ',' + startMC.y.toFixed(4) + '$$' + (points.start.title || '起点') + '$$$$$$');
+      q.set('en', '0$$$$' + endMC.x.toFixed(4) + ',' + endMC.y.toFixed(4) + '$$' + (points.end.title || '终点') + '$$$$$$');
+      q.set('sq', points.start.title || '起点');
+      q.set('eq', points.end.title || '终点');
+      q.set('version', '4');
+      q.set('mrs', '1');
+      q.set('route_traffic', '1');
+      var centerX = ((startMC.x + endMC.x) / 2).toFixed(6);
+      var centerY = ((startMC.y + endMC.y) / 2).toFixed(6);
+      return 'https://map.baidu.com' + path + '@' + centerX + ',' + centerY + ',12z?' + q.toString();
     }
 
     function buildBaiduSchemeRouteUrl(points) {
@@ -783,7 +821,7 @@
         }
       }
 
-      console.log('[Bookmarks -> Maps] loaded');
+      console.log('[Bookmarks -> Amap] loaded');
     }
 
     // expose userscript metadata to IITC plugin list/info page
