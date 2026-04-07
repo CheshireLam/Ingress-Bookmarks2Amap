@@ -1,10 +1,10 @@
 // ==UserScript==
 // @id             iitc-plugin-ingress-bookmarks2amap
-// @name           IITC plugin: Bookmarks -> Amap
+// @name           IITC plugin: Bookmarks -> Maps
 // @author         Cheshire Lam
 // @category       Controls
 // @version        0.1.1
-// @description    Export IITC bookmarks to Amap route links. Code by GPT-5.3-Codex.
+// @description    Export IITC bookmarks to Amap/Baidu/Tencent route links. Code by GPT-5.3-Codex.
 // @match          https://intel.ingress.com/*
 // @match          https://intel-x.ingress.com/*
 // @grant          none
@@ -17,8 +17,10 @@
     if (typeof window.plugin !== 'function') window.plugin = function () {};
 
     var PLUGIN_NS = 'amapBridge';
-    var MAX_POINTS_PER_IOS_SEGMENT = 18; // 1 start + 16 via + 1 end
-    var PREF_PLATFORM_KEY = 'plugin-amapBridge-platform';
+    var PREF_MAP_KEY = 'plugin-amapBridge-map';
+    var TENCENT_REFERER = 'IITC-Intel';
+    var BAIDU_SRC = 'IITC-Intel';
+    var AMAP_WEB_MAX_VIA = 6;
 
     function isFiniteNumber(n) {
       return typeof n === 'number' && Number.isFinite(n);
@@ -76,8 +78,22 @@
       return { lat: lat + dLat, lng: lng + dLon };
     }
 
-    function toAmapCoordinate(item) {
+    function gcj02ToBd09(lat, lng) {
+      var xPi = Math.PI * 3000.0 / 180.0;
+      var z = Math.sqrt(lng * lng + lat * lat) + 0.00002 * Math.sin(lat * xPi);
+      var theta = Math.atan2(lat, lng) + 0.000003 * Math.cos(lng * xPi);
+      var bdLng = z * Math.cos(theta) + 0.0065;
+      var bdLat = z * Math.sin(theta) + 0.006;
+      return { lat: bdLat, lng: bdLng };
+    }
+
+    function toGcjCoordinate(item) {
       return wgs84ToGcj02(item.lat, item.lng);
+    }
+
+    function toBaiduCoordinate(item) {
+      var gcj = toGcjCoordinate(item);
+      return gcj02ToBd09(gcj.lat, gcj.lng);
     }
 
     function readBookmarksObject() {
@@ -139,7 +155,7 @@
     }
 
     function buildAmapMarkerUrl(item) {
-      var p = toAmapCoordinate(item);
+      var p = toGcjCoordinate(item);
       var params = new URLSearchParams();
       params.set('position', p.lng + ',' + p.lat); // lon,lat
       params.set('name', item.title);
@@ -149,49 +165,220 @@
       return 'https://uri.amap.com/marker?' + params.toString();
     }
 
-    function splitIntoSegments(items, maxPointsPerSegment) {
-      if (!Array.isArray(items) || items.length <= 1) return [];
-      var maxPts = Math.max(2, maxPointsPerSegment || MAX_POINTS_PER_IOS_SEGMENT);
-      var segments = [];
-      var i = 0;
-
-      while (i < items.length - 1) {
-        var end = Math.min(i + maxPts - 1, items.length - 1);
-        segments.push(items.slice(i, end + 1));
-        if (end === items.length - 1) break;
-        i = end; // carry endpoint to next segment as next start
-      }
-
-      return segments;
+    function buildBaiduMarkerUrl(item) {
+      var p = toBaiduCoordinate(item);
+      var params = new URLSearchParams();
+      params.set('location', p.lat + ',' + p.lng);
+      params.set('title', item.title);
+      params.set('content', item.title);
+      params.set('output', 'html');
+      params.set('coord_type', 'bd09ll');
+      params.set('src', BAIDU_SRC);
+      return 'https://api.map.baidu.com/marker?' + params.toString();
     }
 
-    function buildCommonRouteParams(segment, sourceApplication) {
-      if (!Array.isArray(segment) || segment.length < 2) return '';
-      var start = segment[0];
-      var end = segment[segment.length - 1];
-      var vias = segment.slice(1, -1).slice(0, 16);
-      var startP = toAmapCoordinate(start);
-      var endP = toAmapCoordinate(end);
-      var viaP = vias.map(toAmapCoordinate);
-
+    function buildTencentMarkerUrl(item) {
+      var p = toGcjCoordinate(item);
       var params = new URLSearchParams();
-      params.set('sourceApplication', sourceApplication || 'IITC-Intel');
+      params.set('marker', 'coord:' + p.lat + ',' + p.lng + ';title:' + item.title + ';addr:' + item.title);
+      params.set('ref', TENCENT_REFERER);
+      return 'https://apis.map.qq.com/uri/v1/marker?' + params.toString();
+    }
+
+    function buildMarkerUrl(item, mapProvider) {
+      if (mapProvider === 'baidu') return buildBaiduMarkerUrl(item);
+      if (mapProvider === 'tencent') return buildTencentMarkerUrl(item);
+      return buildAmapMarkerUrl(item);
+    }
+
+    function pickRoutePoints(items, maxVia) {
+      if (!Array.isArray(items) || items.length < 2) return null;
+      var start = items[0];
+      var end = items[items.length - 1];
+      var vias = items.slice(1, -1);
+      var pickedVia = vias.slice(0, Math.max(0, maxVia));
+      return {
+        start: start,
+        end: end,
+        vias: pickedVia,
+        total: items.length,
+        used: 2 + pickedVia.length
+      };
+    }
+
+    function buildAmapWebRouteUrl(points) {
+      if (!points) return '';
+      var startP = toGcjCoordinate(points.start);
+      var endP = toGcjCoordinate(points.end);
+      var viaP = points.vias.map(toGcjCoordinate);
+      var q = new URLSearchParams();
+      q.set('type', 'car');
+      q.set('policy', '2');
+      q.set('from[lnglat]', startP.lng + ',' + startP.lat);
+      q.set('from[name]', points.start.title);
+      q.set('to[lnglat]', endP.lng + ',' + endP.lat);
+      q.set('to[name]', points.end.title);
+      for (var i = 0; i < viaP.length; i++) {
+        q.set('via[' + i + '][lnglat]', viaP[i].lng + ',' + viaP[i].lat);
+        q.set('via[' + i + '][name]', points.vias[i].title);
+      }
+      q.set('src', 'iitc-amap-bridge');
+      q.set('callnative', '1');
+      return 'https://ditu.amap.com/dir?' + q.toString();
+    }
+
+    function buildAmapSchemeRouteUrl(points, platform) {
+      if (!points) return '';
+      var startP = toGcjCoordinate(points.start);
+      var endP = toGcjCoordinate(points.end);
+      var viaP = points.vias.map(toGcjCoordinate);
+      var params = new URLSearchParams();
+      params.set('sourceApplication', 'IITC-Intel');
       params.set('slat', String(startP.lat));
       params.set('slon', String(startP.lng));
-      params.set('sname', start.title);
+      params.set('sname', points.start.title);
       params.set('dlat', String(endP.lat));
       params.set('dlon', String(endP.lng));
-      params.set('dname', end.title);
+      params.set('dname', points.end.title);
       params.set('dev', '1');
       params.set('t', '0');
-
-      if (vias.length > 0) {
-        params.set('vian', String(vias.length));
+      if (viaP.length > 0) {
+        params.set('vian', String(viaP.length));
         params.set('vialons', viaP.map(function (v) { return String(v.lng); }).join('|'));
         params.set('vialats', viaP.map(function (v) { return String(v.lat); }).join('|'));
-        params.set('vianames', vias.map(function (v) { return String(v.title || 'via'); }).join('|'));
+        params.set('vianames', points.vias.map(function (v) { return String(v.title || 'via'); }).join('|'));
       }
-      return params.toString();
+      var prefix = platform === 'android' ? 'androidamap://route?' : 'iosamap://path?';
+      return prefix + params.toString();
+    }
+
+    function buildBaiduWebRouteUrl(points) {
+      if (!points) return '';
+      // Heavy Baidu web route URL (map.baidu.com/dir) tends to persist A-B better than lightweight direction API.
+      var startP = toBaiduCoordinate(points.start);
+      var endP = toBaiduCoordinate(points.end);
+      var startName = encodeURIComponent(points.start.title || '起点');
+      var endName = encodeURIComponent(points.end.title || '终点');
+      var path = '/dir/' + startName + '/' + endName + '/';
+      var q = new URLSearchParams();
+      q.set('querytype', 'nav');
+      q.set('c', '1');
+      q.set('sn', '2$$$$$$' + (points.start.title || '起点') + '$$0$$$$');
+      q.set('en', '2$$$$$$' + (points.end.title || '终点') + '$$0$$$$');
+      q.set('sc', '1');
+      q.set('ec', '1');
+      q.set('version', '4');
+      q.set('route_traffic', '1');
+      q.set('sy', '0');
+      q.set('src', BAIDU_SRC);
+      // Embed coordinates in viewport hint to keep the map centered around the two points.
+      var centerLng = ((startP.lng + endP.lng) / 2).toFixed(6);
+      var centerLat = ((startP.lat + endP.lat) / 2).toFixed(6);
+      return 'https://map.baidu.com' + path + '@' + centerLng + ',' + centerLat + ',12z?' + q.toString();
+    }
+
+    function buildBaiduSchemeRouteUrl(points) {
+      if (!points) return '';
+      var startP = toBaiduCoordinate(points.start);
+      var endP = toBaiduCoordinate(points.end);
+      var params = new URLSearchParams();
+      params.set('origin', 'latlng:' + startP.lat + ',' + startP.lng + '|name:' + points.start.title);
+      params.set('destination', 'latlng:' + endP.lat + ',' + endP.lng + '|name:' + points.end.title);
+      params.set('mode', 'driving');
+      params.set('coord_type', 'bd09ll');
+      params.set('src', BAIDU_SRC);
+      return 'baidumap://map/direction?' + params.toString();
+    }
+
+    function buildTencentWebRouteUrl(points) {
+      if (!points) return '';
+      var startP = toGcjCoordinate(points.start);
+      var endP = toGcjCoordinate(points.end);
+      var params = new URLSearchParams();
+      params.set('type', 'nav');
+      params.set('from', points.start.title);
+      params.set('fromcoord', startP.lng + ',' + startP.lat);
+      params.set('to', points.end.title);
+      params.set('tocoord', endP.lng + ',' + endP.lat);
+      params.set('tactic', '0');
+      params.set('ref', TENCENT_REFERER);
+      return 'https://map.qq.com/?' + params.toString();
+    }
+
+    function buildTencentSchemeRouteUrl(points) {
+      if (!points) return '';
+      var startP = toGcjCoordinate(points.start);
+      var endP = toGcjCoordinate(points.end);
+      var params = new URLSearchParams();
+      params.set('type', 'drive');
+      params.set('from', points.start.title || '起点');
+      params.set('to', points.end.title || '终点');
+      params.set('fromcoord', startP.lat + ',' + startP.lng);
+      params.set('tocoord', endP.lat + ',' + endP.lng);
+      params.set('policy', '0');
+      params.set('referer', TENCENT_REFERER);
+      return 'qqmap://map/routeplan?' + params.toString();
+    }
+
+    function buildRouteLink(sel, mapProvider, platform, target) {
+      if (!Array.isArray(sel) || sel.length < 2) return '';
+      var web = target === 'web';
+      if (mapProvider === 'baidu') {
+        var baiduPts = pickRoutePoints(sel, 0);
+        return web ? buildBaiduWebRouteUrl(baiduPts) : buildBaiduSchemeRouteUrl(baiduPts);
+      }
+      if (mapProvider === 'tencent') {
+        var qqPts = pickRoutePoints(sel, 0);
+        return web ? buildTencentWebRouteUrl(qqPts) : buildTencentSchemeRouteUrl(qqPts);
+      }
+      var amapPts = pickRoutePoints(sel, web ? AMAP_WEB_MAX_VIA : 16);
+      return web ? buildAmapWebRouteUrl(amapPts) : buildAmapSchemeRouteUrl(amapPts, platform);
+    }
+
+    function buildAmapSchemeMarkerUrl(item, platform) {
+      var p = toGcjCoordinate(item);
+      var params = new URLSearchParams();
+      params.set('sourceApplication', 'IITC-Intel');
+      params.set('poiname', item.title);
+      params.set('lat', String(p.lat));
+      params.set('lon', String(p.lng));
+      params.set('dev', '1');
+      var prefix = platform === 'android' ? 'androidamap://viewMap?' : 'iosamap://viewMap?';
+      return prefix + params.toString();
+    }
+
+    function buildBaiduSchemeMarkerUrl(item) {
+      var p = toBaiduCoordinate(item);
+      var params = new URLSearchParams();
+      params.set('location', p.lat + ',' + p.lng);
+      params.set('title', item.title);
+      params.set('content', item.title);
+      params.set('coord_type', 'bd09ll');
+      params.set('src', BAIDU_SRC);
+      return 'baidumap://map/marker?' + params.toString();
+    }
+
+    function buildTencentSchemeMarkerUrl(item) {
+      var p = toGcjCoordinate(item);
+      var params = new URLSearchParams();
+      params.set('marker', 'coord:' + p.lat + ',' + p.lng + ';title:' + item.title + ';addr:' + item.title);
+      params.set('referer', TENCENT_REFERER);
+      return 'qqmap://map/marker?' + params.toString();
+    }
+
+    function buildMarkerLink(item, mapProvider, platform, target) {
+      if (target === 'web') return buildMarkerUrl(item, mapProvider);
+      if (mapProvider === 'baidu') return buildBaiduSchemeMarkerUrl(item);
+      if (mapProvider === 'tencent') return buildTencentSchemeMarkerUrl(item);
+      return buildAmapSchemeMarkerUrl(item, platform);
+    }
+
+    function buildMarkerLinks(item, mapProvider) {
+      return {
+        web: buildMarkerLink(item, mapProvider, 'ios', 'web'),
+        ios: buildMarkerLink(item, mapProvider, 'ios', 'app'),
+        android: buildMarkerLink(item, mapProvider, 'android', 'app')
+      };
     }
 
     function escapeHtml(s) {
@@ -213,6 +400,14 @@
       }
     }
 
+    function openUrlInNewTab(url) {
+      if (!url) return;
+      var win = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!win) {
+        window.prompt('浏览器拦截了新标签页，请手动打开：', url);
+      }
+    }
+
     function detectPlatform() {
       var ua = String((window.navigator && window.navigator.userAgent) || '').toLowerCase();
       if (ua.indexOf('android') !== -1) return 'android';
@@ -229,7 +424,6 @@
       if (!ll || !isFiniteNumber(ll.lat) || !isFiniteNumber(ll.lng)) return null;
       var title = '';
       if (p.options && p.options.data && p.options.data.title) title = String(p.options.data.title);
-      if (!title) title = guid;
       return { title: title, lat: ll.lat, lng: ll.lng };
     }
 
@@ -251,20 +445,25 @@
 
       var html = [
         '<div>',
-        '<p><b>当前 Portal:</b><span id="amap-current-portal">未选中</span> <button id="amap-open-current" disabled>跳转高德地图</button> <button id="amap-copy-current">复制当前 Portal 链接</button></p>',
-        '<p>&nbsp;</p>',
-        '<p><b>Bookmarks Portal:</b> 选择 Folder（已选 Portal：<span id="amap-selected-count">0</span>）</p>',
+        '<p style="margin:4px 0;"><b>地图切换:</b> <select id="amap-map-provider"><option value="amap">高德</option><option value="baidu">百度</option><option value="tencent">腾讯</option></select></p>',
+        '<div style="border-top:1px solid rgba(255,255,255,0.2);margin:6px 0;"></div>',
+        '<p style="margin:4px 0;"><b>当前 Portal:</b> <span id="amap-current-portal">未选中</span></p>',
+        '<p style="margin:4px 0;"><a href="#" id="amap-open-current">跳转地图</a> <a href="#" id="amap-copy-current-web">复制 Web 链接</a> <a href="#" id="amap-copy-current-ios">复制 iOS 链接</a> <a href="#" id="amap-copy-current-android">复制 Android 链接</a></p>',
+        '<div style="border-top:1px solid rgba(255,255,255,0.2);margin:6px 0;"></div>',
+        '<p style="margin:4px 0;"><b>Bookmarks Portal:</b> 已选 Folder: <span id="amap-selected-folder-count">0</span>/<span id="amap-total-folder-count">' + folders.length + '</span>, Portal: <span id="amap-selected-portal-count">0</span>/<span id="amap-total-portal-count">' + items.length + '</span></p>',
         '<div id="amap-folder-list" style="margin:8px 0 10px 0;">',
         folders.map(function (f) {
           return '<label style="display:inline-block;margin-right:10px;"><input type="checkbox" class="amap-folder-check" data-folder="' + escapeHtml(f) + '" checked> ' + escapeHtml(f) + '</label>';
         }).join(''),
         '</div>',
-        '<p>平台：<select id="amap-platform"><option value="ios">iOS</option><option value="android">Android</option></select> <button id="amap-open-amap">跳转高德地图</button> <button id="amap-copy-route">复制路线链接</button></p>',
+        '<p id="amap-start-row" style="margin:4px 0;"><b>起始 Portal:</b> <select id="amap-start-select"></select></p>',
+        '<p id="amap-end-row" style="margin:4px 0;"><b>目的 Portal:</b> <select id="amap-end-select"></select></p>',
+        '<div id="amap-via-wrap" style="display:none;margin:0;"><details id="amap-via-dropdown" style="display:inline-block;vertical-align:middle;"><summary><b>途经 Portal:</b></summary><div id="amap-via-checks" style="max-height:140px;overflow:auto;min-width:260px;padding:1px 0;"></div></details></div>',
+        '<p style="margin:2px 0;"><a href="#" id="amap-open-amap">跳转地图</a> <a href="#" id="amap-copy-route-web">复制 Web 链接</a> <a href="#" id="amap-copy-route-ios">复制 iOS 链接</a> <a href="#" id="amap-copy-route-android">复制 Android 链接</a></p>',
         normalized.warnings.length ? '<p style="color:#b35c00;">警告: ' + normalized.warnings.length + ' 条（详见 JSON）</p>' : '',
-        '<textarea id="amap-output-common" readonly style="width:100%;height:180px;"></textarea>',
-        '<p style="color:#666;">高德地图「顺路规划」功能目前可添加 16 个途径点，即可以支持「起点 -> 途径点 -> 终点」共 18 个位置。</p>',
-        '<p style="color:#666;">高德地图 URI Web 最多只支持添加一个途径点，在网页版使用「Bookmarks -> Amap」链接可能会丢失途径点数据。</p>',
-        '<p style="color:#666;">如果无法跳转至高德地图，请复制链接并使用系统浏览器打开链接。</p>',
+        '<div style="border-top:1px solid rgba(255,255,255,0.2);margin:6px 0;"></div>',
+        '<p style="margin:4px 0;"><b>Hints:</b></p>',
+        '<div id="amap-hints" style="color:#fff;line-height:1.4;"></div>',
         '</div>'
       ].join('');
 
@@ -277,12 +476,22 @@
       setTimeout(function () {
         var folderChecks = Array.prototype.slice.call(document.querySelectorAll('.amap-folder-check'));
         var btnOpenCurrent = document.getElementById('amap-open-current');
-        var btnCopyCurrent = document.getElementById('amap-copy-current');
-        var btnCopyRoute = document.getElementById('amap-copy-route');
+        var btnCopyCurrentWeb = document.getElementById('amap-copy-current-web');
+        var btnCopyCurrentIos = document.getElementById('amap-copy-current-ios');
+        var btnCopyCurrentAndroid = document.getElementById('amap-copy-current-android');
+        var btnCopyRouteWeb = document.getElementById('amap-copy-route-web');
+        var btnCopyRouteIos = document.getElementById('amap-copy-route-ios');
+        var btnCopyRouteAndroid = document.getElementById('amap-copy-route-android');
         var btnOpenAmap = document.getElementById('amap-open-amap');
-        var platformSelect = document.getElementById('amap-platform');
-        var outputCommon = document.getElementById('amap-output-common');
-        var selectedCountEl = document.getElementById('amap-selected-count');
+        var mapProviderSelect = document.getElementById('amap-map-provider');
+        var startSelect = document.getElementById('amap-start-select');
+        var endSelect = document.getElementById('amap-end-select');
+        var viaWrap = document.getElementById('amap-via-wrap');
+        var viaDropdown = document.getElementById('amap-via-dropdown');
+        var viaChecks = document.getElementById('amap-via-checks');
+        var hintsEl = document.getElementById('amap-hints');
+        var selectedFolderCountEl = document.getElementById('amap-selected-folder-count');
+        var selectedPortalCountEl = document.getElementById('amap-selected-portal-count');
         var currentPortalEl = document.getElementById('amap-current-portal');
         var lastSelectedPortalGuid = '';
 
@@ -294,92 +503,241 @@
           return items.filter(function (x) { return !!selectedFolders[x.folder]; });
         }
 
-        function buildLinksForPlatform(sel, platform) {
-          if (!Array.isArray(sel) || sel.length < 2) return [];
-          var prefix = platform === 'android' ? 'androidamap://route?' : 'iosamap://path?';
-          var segments = splitIntoSegments(sel, MAX_POINTS_PER_IOS_SEGMENT);
-          return segments.map(function (seg) {
-            return buildCommonRouteParams(seg, 'IITC-Intel');
-          }).filter(Boolean).map(function (p) {
-            return prefix + p;
-          });
+        function renderHints() {
+          if (!hintsEl) return;
+          hintsEl.innerHTML = [
+            '<p style="white-space:nowrap;margin:0;line-height:1.4;">1) 高德地图、腾讯地图、百度地图均支持选择起始 Portal、目的 Portal。</p>',
+            '<p style="white-space:nowrap;margin:0;line-height:1.4;">2) 高德地图支持多选途经 Portal，移动端最多 16 个，网页端最多 6 个。</p>',
+            '<p style="white-space:nowrap;margin:0;line-height:1.4;">3) 如果无法跳转，请复制并使用系统浏览器打开链接。</p>'
+          ].join('');
+        }
+
+        function setLinkDisabled(el, disabled) {
+          if (!el) return;
+          el.setAttribute('data-disabled', disabled ? '1' : '0');
+          el.style.pointerEvents = disabled ? 'none' : '';
+          el.style.opacity = disabled ? '0.5' : '';
+        }
+
+        function setViaVisibility(show) {
+          if (!viaWrap) return;
+          if (show) {
+            viaWrap.hidden = false;
+            viaWrap.style.display = 'block';
+            viaWrap.style.maxHeight = '';
+            viaWrap.style.overflow = '';
+            viaWrap.style.pointerEvents = '';
+            viaWrap.style.margin = '0';
+          } else {
+            viaWrap.hidden = true;
+            viaWrap.style.display = 'none';
+            viaWrap.style.maxHeight = '0';
+            viaWrap.style.overflow = 'hidden';
+            viaWrap.style.pointerEvents = 'none';
+            viaWrap.style.margin = '0';
+          }
+        }
+
+        function currentTarget() {
+          return detectPlatform() ? 'app' : 'web';
+        }
+
+        function currentPlatform() {
+          var p = detectPlatform();
+          if (p === 'android') return 'android';
+          return 'ios';
+        }
+
+        function escapeHtmlOption(s) {
+          return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        }
+
+        function renderEndpointSelectors(sel, mapProvider) {
+          if (!startSelect || !endSelect) return;
+          setViaVisibility(mapProvider === 'amap');
+          if (viaDropdown && mapProvider !== 'amap') viaDropdown.open = false;
+
+          var prevStart = String(startSelect.value || '');
+          var prevEnd = String(endSelect.value || '');
+          var prevVia = viaChecks ? Array.prototype.slice.call(viaChecks.querySelectorAll('.amap-via-check:checked')).map(function (ip) { return String(ip.value); }) : [];
+          var options = sel.map(function (item, idx) {
+            return '<option value="' + idx + '">' + escapeHtmlOption(item.title) + '</option>';
+          }).join('');
+          startSelect.innerHTML = options;
+          endSelect.innerHTML = options;
+
+          if (sel.length < 2) {
+            startSelect.disabled = true;
+            endSelect.disabled = true;
+            if (viaChecks) Array.prototype.forEach.call(viaChecks.querySelectorAll('.amap-via-check'), function (ip) { ip.disabled = true; ip.checked = false; });
+            return;
+          }
+
+          startSelect.disabled = false;
+          endSelect.disabled = false;
+
+          var startIdx = Number(prevStart);
+          var endIdx = Number(prevEnd);
+          if (!Number.isInteger(startIdx) || startIdx < 0 || startIdx >= sel.length) startIdx = 0;
+          if (!Number.isInteger(endIdx) || endIdx < 0 || endIdx >= sel.length) endIdx = 1;
+          if (startIdx === endIdx) endIdx = (startIdx + 1) % sel.length;
+          startSelect.value = String(startIdx);
+          endSelect.value = String(endIdx);
+
+          if (viaChecks) {
+            var selectedSet = {};
+            prevVia.forEach(function (x) { selectedSet[x] = true; });
+            viaChecks.innerHTML = sel.filter(function (_, idx) {
+              return idx !== startIdx && idx !== endIdx;
+            }).map(function (item) {
+              var originalIdx = sel.indexOf(item);
+              var checked = selectedSet[String(originalIdx)] ? ' checked' : '';
+              return '<label style="display:block;white-space:nowrap;"><input type="checkbox" class="amap-via-check" value="' + originalIdx + '"' + checked + '> ' + escapeHtmlOption(item.title) + '</label>';
+            }).join('');
+            if (mapProvider !== 'amap') {
+              Array.prototype.forEach.call(viaChecks.querySelectorAll('.amap-via-check'), function (ip) { ip.checked = false; });
+            }
+          }
+        }
+
+        function selectedEndpoints(sel) {
+          if (!startSelect || !endSelect || !Array.isArray(sel) || sel.length < 2) return null;
+          var startIdx = Number(startSelect.value);
+          var endIdx = Number(endSelect.value);
+          if (!Number.isInteger(startIdx) || !Number.isInteger(endIdx)) return null;
+          if (startIdx < 0 || startIdx >= sel.length || endIdx < 0 || endIdx >= sel.length) return null;
+          if (startIdx === endIdx) return null;
+          return { start: sel[startIdx], end: sel[endIdx] };
+        }
+
+        function selectedRouteItems(sel, mapProvider) {
+          var ends = selectedEndpoints(sel);
+          if (!ends) return [];
+          if (mapProvider !== 'amap' || !viaChecks) return [ends.start, ends.end];
+          var viaIdxList = Array.prototype.slice.call(viaChecks.querySelectorAll('.amap-via-check:checked')).map(function (ip) { return Number(ip.value); }).filter(function (i) { return Number.isInteger(i); });
+          var viaItems = viaIdxList.map(function (i) { return sel[i]; }).filter(Boolean);
+          return [ends.start].concat(viaItems).concat([ends.end]);
+        }
+
+        function buildRouteLinksByMode(sel, mapProvider) {
+          var routeItems = selectedRouteItems(sel, mapProvider);
+          if (routeItems.length < 2) return { web: '', ios: '', android: '' };
+          return {
+            web: buildRouteLink(routeItems, mapProvider, 'ios', 'web'),
+            ios: buildRouteLink(routeItems, mapProvider, 'ios', 'app'),
+            android: buildRouteLink(routeItems, mapProvider, 'android', 'app')
+          };
         }
 
         function refreshOutputs() {
           var sel = selectedItems();
           var currentPortal = getCurrentPortalData();
-          var platform = (platformSelect && platformSelect.value) || 'ios';
-          var routeLinks = buildLinksForPlatform(sel, platform);
-
-          outputCommon.value = routeLinks.join('\n');
-          selectedCountEl.textContent = String(sel.length);
-          if (currentPortal) {
-            currentPortalEl.textContent = currentPortal.title;
-            btnOpenCurrent.disabled = false;
-            btnOpenCurrent.setAttribute('data-url', buildAmapMarkerUrl(currentPortal));
-            btnCopyCurrent.disabled = false;
-            btnCopyCurrent.setAttribute('data-url', buildAmapMarkerUrl(currentPortal));
-          } else {
-            currentPortalEl.textContent = '未选中';
-            btnOpenCurrent.disabled = true;
-            btnOpenCurrent.setAttribute('data-url', '');
-            btnCopyCurrent.disabled = true;
-            btnCopyCurrent.setAttribute('data-url', '');
+          var mapProvider = (mapProviderSelect && mapProviderSelect.value) || 'amap';
+          var platform = currentPlatform();
+          var target = currentTarget();
+          renderEndpointSelectors(sel, mapProvider);
+          var routeItems = selectedRouteItems(sel, mapProvider);
+          if (selectedPortalCountEl) selectedPortalCountEl.textContent = String(routeItems.length);
+          if (selectedFolderCountEl) {
+            var folderCount = folderChecks.filter(function (ch) { return ch.checked; }).length;
+            selectedFolderCountEl.textContent = String(folderCount);
           }
+          renderHints();
+          var btnOpenRouteText = target === 'web' ? '打开地图' : '跳转地图';
+          if (btnOpenAmap) btnOpenAmap.textContent = btnOpenRouteText;
+          if (btnOpenCurrent) btnOpenCurrent.textContent = btnOpenRouteText;
+          var hasPortalTitle = !!(currentPortal && currentPortal.title && String(currentPortal.title).trim());
+          if (currentPortal && (mapProvider !== 'tencent' || hasPortalTitle)) {
+            currentPortalEl.textContent = currentPortal.title;
+            setLinkDisabled(btnOpenCurrent, false);
+            var markerLinks = buildMarkerLinks(currentPortal, mapProvider);
+            btnOpenCurrent.setAttribute('data-url', target === 'web' ? markerLinks.web : markerLinks[platform]);
+            btnCopyCurrentWeb.setAttribute('data-url', markerLinks.web || '');
+            btnCopyCurrentIos.setAttribute('data-url', markerLinks.ios || '');
+            btnCopyCurrentAndroid.setAttribute('data-url', markerLinks.android || '');
+            setLinkDisabled(btnCopyCurrentWeb, !markerLinks.web);
+            setLinkDisabled(btnCopyCurrentIos, !markerLinks.ios);
+            setLinkDisabled(btnCopyCurrentAndroid, !markerLinks.android);
+          } else {
+            currentPortalEl.textContent = currentPortal ? '' : '未选中';
+            setLinkDisabled(btnOpenCurrent, true);
+            btnOpenCurrent.setAttribute('data-url', '');
+            btnCopyCurrentWeb.setAttribute('data-url', '');
+            btnCopyCurrentIos.setAttribute('data-url', '');
+            btnCopyCurrentAndroid.setAttribute('data-url', '');
+            setLinkDisabled(btnCopyCurrentWeb, true);
+            setLinkDisabled(btnCopyCurrentIos, true);
+            setLinkDisabled(btnCopyCurrentAndroid, true);
+          }
+          var routeLinks = buildRouteLinksByMode(sel, mapProvider);
+          var openRouteUrl = target === 'web' ? (routeLinks.web || '') : (routeLinks[platform] || '');
+          btnOpenAmap.setAttribute('data-url', openRouteUrl);
+          setLinkDisabled(btnOpenAmap, !openRouteUrl);
+          btnCopyRouteWeb.setAttribute('data-url', routeLinks.web || '');
+          btnCopyRouteIos.setAttribute('data-url', routeLinks.ios || '');
+          btnCopyRouteAndroid.setAttribute('data-url', routeLinks.android || '');
+          setLinkDisabled(btnCopyRouteWeb, !routeLinks.web);
+          setLinkDisabled(btnCopyRouteIos, !routeLinks.ios);
+          setLinkDisabled(btnCopyRouteAndroid, !routeLinks.android);
           lastSelectedPortalGuid = window.selectedPortal ? String(window.selectedPortal) : '';
         }
 
         folderChecks.forEach(function (ch) {
           ch.addEventListener('change', refreshOutputs);
         });
-        refreshOutputs();
+        if (startSelect) startSelect.addEventListener('change', refreshOutputs);
+        if (endSelect) endSelect.addEventListener('change', refreshOutputs);
+        if (viaChecks) viaChecks.addEventListener('change', refreshOutputs);
 
-        if (btnOpenCurrent) btnOpenCurrent.onclick = function () {
-          if (btnOpenCurrent.disabled) return;
+        if (btnOpenCurrent) btnOpenCurrent.onclick = function (ev) {
+          ev.preventDefault();
+          if (btnOpenCurrent.getAttribute('data-disabled') === '1') return;
           var u = btnOpenCurrent.getAttribute('data-url') || '';
           if (!u) return;
-          window.location.href = u;
+          if (currentTarget() === 'web') openUrlInNewTab(u);
+          else window.location.href = u;
         };
 
-        if (btnCopyCurrent) btnCopyCurrent.onclick = function () {
-          if (btnCopyCurrent.disabled) return;
-          copyText(btnCopyCurrent.getAttribute('data-url') || '');
-        };
+        if (btnCopyCurrentWeb) btnCopyCurrentWeb.onclick = function (ev) { ev.preventDefault(); refreshOutputs(); if (btnCopyCurrentWeb.getAttribute('data-disabled') === '1') return; copyText(btnCopyCurrentWeb.getAttribute('data-url') || ''); };
+        if (btnCopyCurrentIos) btnCopyCurrentIos.onclick = function (ev) { ev.preventDefault(); refreshOutputs(); if (btnCopyCurrentIos.getAttribute('data-disabled') === '1') return; copyText(btnCopyCurrentIos.getAttribute('data-url') || ''); };
+        if (btnCopyCurrentAndroid) btnCopyCurrentAndroid.onclick = function (ev) { ev.preventDefault(); refreshOutputs(); if (btnCopyCurrentAndroid.getAttribute('data-disabled') === '1') return; copyText(btnCopyCurrentAndroid.getAttribute('data-url') || ''); };
 
-        if (platformSelect) {
-          var detected = detectPlatform();
-          var saved = window.localStorage.getItem(PREF_PLATFORM_KEY);
-          if (detected === 'ios' || detected === 'android') {
-            platformSelect.value = detected;
-          } else if (saved === 'ios' || saved === 'android') {
-            platformSelect.value = saved;
+        if (mapProviderSelect) {
+          var savedMap = window.localStorage.getItem(PREF_MAP_KEY);
+          if (savedMap === 'amap' || savedMap === 'baidu' || savedMap === 'tencent') {
+            mapProviderSelect.value = savedMap;
           } else {
-            platformSelect.value = 'ios';
+            mapProviderSelect.value = 'amap';
           }
-          window.localStorage.setItem(PREF_PLATFORM_KEY, platformSelect.value);
-          platformSelect.addEventListener('change', function () {
-            window.localStorage.setItem(PREF_PLATFORM_KEY, platformSelect.value);
+          window.localStorage.setItem(PREF_MAP_KEY, mapProviderSelect.value);
+          mapProviderSelect.addEventListener('change', function () {
+            window.localStorage.setItem(PREF_MAP_KEY, mapProviderSelect.value);
+            setViaVisibility(mapProviderSelect.value === 'amap');
+            if (viaDropdown && mapProviderSelect.value !== 'amap') viaDropdown.open = false;
             refreshOutputs();
           });
         }
+        refreshOutputs();
 
-        if (btnCopyRoute) btnCopyRoute.onclick = function () {
-          var sel = selectedItems();
-          var platform = (platformSelect && platformSelect.value) || 'ios';
-          var links = buildLinksForPlatform(sel, platform);
-          copyText(links.join('\n'));
-        };
+        if (btnCopyRouteWeb) btnCopyRouteWeb.onclick = function (ev) { ev.preventDefault(); refreshOutputs(); if (btnCopyRouteWeb.getAttribute('data-disabled') === '1') return; copyText(btnCopyRouteWeb.getAttribute('data-url') || ''); };
+        if (btnCopyRouteIos) btnCopyRouteIos.onclick = function (ev) { ev.preventDefault(); refreshOutputs(); if (btnCopyRouteIos.getAttribute('data-disabled') === '1') return; copyText(btnCopyRouteIos.getAttribute('data-url') || ''); };
+        if (btnCopyRouteAndroid) btnCopyRouteAndroid.onclick = function (ev) { ev.preventDefault(); refreshOutputs(); if (btnCopyRouteAndroid.getAttribute('data-disabled') === '1') return; copyText(btnCopyRouteAndroid.getAttribute('data-url') || ''); };
 
-        if (btnOpenAmap) btnOpenAmap.onclick = function () {
-          var sel = selectedItems();
-          var platform = (platformSelect && platformSelect.value) || 'ios';
-          var links = buildLinksForPlatform(sel, platform);
-          if (!links.length) {
+        if (btnOpenAmap) btnOpenAmap.onclick = function (ev) {
+          ev.preventDefault();
+          if (btnOpenAmap.getAttribute('data-disabled') === '1') return;
+          var link = btnOpenAmap.getAttribute('data-url') || '';
+          if (!link) {
             alert('没有可跳转的路线，请先选择至少 2 个 portal。');
             return;
           }
-          // Keep native scheme only for iOS/Android.
-          window.location.href = links[0];
+          if (currentTarget() === 'web') openUrlInNewTab(link);
+          else window.location.href = link;
         };
 
         if (typeof window.addHook === 'function') {
@@ -401,8 +759,7 @@
         readBookmarksObject: readBookmarksObject,
         normalizePortalsFromBookmarks: normalizePortalsFromBookmarks,
         buildAmapMarkerUrl: buildAmapMarkerUrl,
-        buildCommonRouteParams: buildCommonRouteParams,
-        splitIntoSegments: splitIntoSegments
+        buildRouteLink: buildRouteLink
       };
 
       if (window.IITC && window.IITC.toolbox && typeof window.IITC.toolbox.addButton === 'function') {
@@ -426,7 +783,7 @@
         }
       }
 
-      console.log('[Bookmarks -> Amap] loaded');
+      console.log('[Bookmarks -> Maps] loaded');
     }
 
     // expose userscript metadata to IITC plugin list/info page
