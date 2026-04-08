@@ -273,7 +273,8 @@
       params.set('dlat', String(endP.lat));
       params.set('dlon', String(endP.lng));
       params.set('dname', points.end.title);
-      params.set('dev', '1');
+      // Coordinates are already converted to GCJ-02 for Amap.
+      params.set('dev', '0');
       params.set('t', '0');
       if (viaP.length > 0) {
         params.set('vian', String(viaP.length));
@@ -380,7 +381,8 @@
       params.set('poiname', item.title);
       params.set('lat', String(p.lat));
       params.set('lon', String(p.lng));
-      params.set('dev', '1');
+      // Coordinates are already converted to GCJ-02 for Amap.
+      params.set('dev', '0');
       var prefix = platform === 'android' ? 'androidamap://viewMap?' : 'iosamap://viewMap?';
       return prefix + params.toString();
     }
